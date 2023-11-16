@@ -40,6 +40,8 @@ For the example workload we used tax-form documents: the initial (pre-LLM) probl
 * Production considerations
 * Research areas
 
+#### [Notebooks with output](https://arcta.me/projects/dustbin/tax-doca-archive)
+
 <a name="design"></a>
 
 ### System design considerations
