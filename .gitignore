@@ -1,0 +1,7 @@
+*.vscode
+*.cnf
+.DS_Store
+*/.ipynb_checkpoints
+code/data
+code/models
+
