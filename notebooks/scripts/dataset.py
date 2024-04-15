@@ -1,294 +1,312 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-#------------------------------------------------
-# datasets used in notebooks
-#------------------------------------------------
-
-import os
-import re
 import torch
 import numpy as np
 import pandas as pd
 
-from PIL import Image, ImageOps
-from matplotlib import pyplot as plt
-from pathlib import Path
-from typing import Callable
-from einops import rearrange, repeat
-
+from typing import Optional, Callable
 from torch import nn, Tensor
-from torchvision import transforms, models
 from torch.utils.data import DataLoader, Dataset
 
-from . import simulate as sim
-from . import parse, render
+from .extract import *
 
 
-# notebooks path
-ROOT = f'{os.environ["HOME"]}/notebooks'
+labels = pd.read_csv('./data/training-labels.csv')
+index = pd.read_csv('./data/training-index.csv')
+trainset = index[index['test']==0]['source'].tolist()
+testset  = index[index['test']==1]['source'].tolist()
 
-ORDER = ['void','line','input','word']
-SEGMENTATION_WEIGHT = [0.02, 0.74, 0.21, 0.03]
-DENOISING_WEIGHT = [0.07, 0.93]
+INDEX  = labels[(labels['label'].str.len()==1)&(labels['count'] > 1)]['label'].tolist()
+WEIGHT = labels.set_index('label').loc[INDEX,'weight'].tolist()
 
+NUM_CLASSES = 156
 
-# random images (not docs -- no text) for out-of-class examples
-NONDOCS = [str(x) for x in Path(f'{ROOT}/data/unsplash').glob('*.jpg')]
-# fraction of non-docs to show if needed
-CONTRAST = 0.
-
-
-# common preprocessing
-class NormalizeView:
-    """
-    map to [0,1] and put channels first
-    """
-    def __call__(self, X):
-        low, high = np.min(X), np.max(X)
-        X = (X - low).astype(float)
-        if high > low:
-            X /= (high - low)
-        if len(X.shape) == 3:
-            h, w, c = X.shape
-            return torch.Tensor(X).view(c, h, w)
-        return torch.Tensor(X).unsqueeze(0)
-    
-    
-def rolling_window(a, w):
-    a = np.array(a)
-    shape = a.shape[:-1] + (a.shape[-1] - w + 1, w)
-    strides = a.strides + (a.strides[-1],)
-    return np.lib.stride_tricks.as_strided(a, shape=shape, strides=strides)
+#EXTRAS = [s for s in '‹›«»"|_' if s not in INDEX]
+INDEX = [' '] + INDEX #+ EXTRAS
+WEIGHT = [round(1./len(trainset + testset), 4)] + WEIGHT #+ [1.] * len(EXTRAS)
+INDEX += [''] * (NUM_CLASSES - len(INDEX))
+WEIGHT += [1e-6] * (NUM_CLASSES - len(WEIGHT))
 
 
-def make_noisy_sample(view):
-    h, w = view.shape
-    noise = sim.generate_noise(max(w, h), light_bias=0.5, noise_strength=0.5)[:h,:w]
-    return (1 - (view/255. * (0.5 + noise * 0.5))) * 255
-
-
-def add_occlusion_mask(view: np.array) -> np.array:
-    """
-    add few random gradient stripes across the view
-    """
-    view = view.squeeze()
-    view_size = max(view.shape)
-    if np.random.rand() < 0.5:
-        for x in np.random.randint(20, 200, np.random.randint(0, 5)):
-            d = np.random.randint(10, 20)
-            mask = np.array([list(range(d, 0, -1)) + list(range(d))]).astype(float)/d
-            view[:,x - d:x + d] *= np.repeat(mask, view_size, axis=0)
-        return view
-
-    for x in np.random.randint(20, 200, np.random.randint(0, 5)):
-        d = np.random.randint(10, 20)
-        mask = np.array([list(range(d, 0, -1)) + list(range(d))]).astype(float)/d
-        view[x - d:x + d,:] *= np.repeat(mask, view_size, axis=0).T
-    return view
-
-
-def make_negative_sample(view_size: int):
-    """
-    generate random non-document view
-    """
-    sample = 255 - np.array(ImageOps.grayscale(Image.open(np.random.choice(NONDOCS))))
-    nav = render.AgentView(sample, view_size, bias=np.random.randint(100))
-    center = (np.array(sample.shape) * (1 - np.random.rand(2))).astype(int)
-    rotation = np.random.randint(0, 360)
-    zoom = np.random.rand() * 2 - 2
-    return nav.render(center, rotation, zoom)
-
-
-def get_layout_labels() -> pd.DataFrame:
-    """
-    baselines: simple-layout dataset generated data
-    """
-    labels = pd.read_csv(f'{ROOT}/data/layout-baseline/labels.csv.gz')
-    labels['type'] = (labels['inputs'] > 4).astype(int)
-    return labels.loc[:,['orientation','type','path']]
-
-
-def set_layout_labels(test_samples: list) -> pd.DataFrame:
-    """
-    mark training/validation subsets
-    """
-    labels = pd.read_csv(f'{ROOT}/data/layout-baseline/labels.csv.gz')
-    labels['test'] = 0
-    labels.loc[labels['source'].isin([x.split('/').pop()[:-4] for x in test_samples]),'test'] = 1
-    labels['type'] = (labels['inputs'] > 4).astype(int)
-    return labels.loc[:,['orientation','type','path','test']]
-
-
-class CenterCrop:
-    def __init__(self, view_size: int):
-        self.view_size = view_size
-        
-    def __call__(self, X):
-        X = X.squeeze()
-        assert len(X.shape) == 2
-        h, w = X.shape
-        h, w = (h - self.view_size)//2, (w - self.view_size)//2
-        return X[h:h + self.view_size,w:w + self.view_size]
-
-
-class SimpleLayoutDataset(Dataset):
-    """
-    pages top-views with some non-docs for contrast if `nondocs_fracthion` > 0
-    """
-    def __init__(self, view_size: int, samples: pd.DataFrame, nondocs_fracthion: float = 0., batch_size: int = 32):
-        self.view_size = view_size
-        self.samples = samples
-        order = list(range(len(samples))) + [-1] * int(len(samples) * nondocs_fracthion)
-        self.order = np.random.choice(order, len(order), replace=False)
-        self.transform = CenterCrop(view_size)
-
-    def __len__(self):
-        return len(self.order)
-
-    def __getitem__(self, idx):
-        if self.order[idx] == -1:
-            X = NormalizeView()(make_negative_sample(self.view_size))
-            return X, (torch.tensor(0).long(), torch.tensor(0).long())
-        source = self.samples.iloc[self.order[idx]].to_dict()
-        X = NormalizeView()(self.transform(np.array(ImageOps.grayscale(Image.open(source['path'])))))
-        Y1 = torch.tensor(source['orientation']//90 + 1).long()
-        Y2 = torch.tensor(source['type'] + 1).long()
-        return X, (Y1, Y2)
-
-
-class RandomViewDataset(Dataset):
-    """
-    use a single document noisy variation to create a batch of random view-ports
-    make new data loader for each doc rather than reload resources for each view
-    this scenario makes training very sensitive to the bad samples with bigger batches
-    """
-    def __init__(self, source: str, view_size: int, max_samples: int = 64, threshold: float = 0.25):
-        self.view_size = view_size
-        self.max_samples = max_samples
-        self.threshold = threshold
-        # load source image
-        orig = np.array(ImageOps.grayscale(Image.open(f'{ROOT}/data/images/{source}')))
-        view = make_noisy_sample(orig)
-        # define renderers for all
-        self.view = render.AgentView((view).astype(np.uint8), view_size, bias=np.random.randint(100))
-        self.target = render.AgentView(255. - orig, view_size)
-        # define image preprocesing
-        self.transform = NormalizeView()
-
-    def __len__(self):
-        return self.max_samples
-    
-    def random_viewport(self):
-        # pan: anywhere within the page-view bounding box
-        center = (np.array(self.view.space.center) * (0.25 + np.random.rand() * 1.5)).astype(int)
-        rotation = np.random.randint(0, 360)
-        zoom = np.random.rand() * 4 - 3.5
-        return center, rotation, zoom
-    
-    def __getitem__(self, idx):
-        # once a while we need a negative sample
-        if np.random.rand() < CONTRAST:
-            X = self.transform(make_negative_sample(self.view_size))
-            Y = torch.Tensor(np.zeros((self.view_size, self.view_size))).long()
-            return X, Y
-        # generate random viewport
-        center, rotation, zoom = self.random_viewport()
-        std = 0
-        while std < 10: # make sure there's something to see
-            center, rotation, zoom = self.random_viewport()
-            view = self.view.render(center, rotation, zoom)
-            std = np.std(view)
-        # render corresponding views
-        X = self.transform(view)
-        # initialize masks channels
-        target = self.transform(self.target.render(center, rotation, zoom))
-        # sqrt here to make subtle lines pass the threshold
-        Y = (target >= self.threshold).squeeze().long()
-        return X, Y
-
-
-class TopViewDataset(Dataset):
-    """
-    render full-page view
-    """
-    def __init__(self, view_size: int, samples: list, labels: list, contrast: float = 0.):
-        self.view_size = view_size
-        # add non-docs for contrast if needed
-        n, c = int(len(samples) * contrast), max(labels)
-        self.samples = list(samples) + ['?'] * n
-        self.labels = labels
-        self.non_doc_class = c + 1
-        self.transform = NormalizeView()
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        source = self.samples[idx]
-
-        if source == '?': # non-doc sample for contrast
-            X = self.transform(make_negative_sample(self.view_size))
-            Y = self.non_doc_class
-            return X, Y
-        
-        # load source image
-        view = np.array(ImageOps.grayscale(Image.open(f'{ROOT}/data/images/{source}.png')))
-        # renderer full-page view
-        view = render.AgentView((255. - view).astype(np.uint8), self.view_size).top()
-        X = self.transform(view)
-        Y = self.labels[idx]
-        return X, Y
-    
-    
-def get_alignment_weight(alignment_threshold=0, aligned_fraction=0.2, unknown_fraction=CONTRAST):
-    """
-    estimate MultitaskPretrainingDataset alignment task class-weight given chosen configuration
-    """
-    x = []
-    for _ in range(10000):
-        if np.random.rand() < unknown_fraction:
-            x.append(0)
-        else:
-            r = np.random.choice([0, 90, 180, 270]) if np.random.rand() < aligned_fraction else \
-                np.random.randint(0, 360)
-            d = r % 90
-            x.append(int(min(d, 90 - d) <= alignment_threshold) + 1)
-
-    w = pd.Series(x)
-    w = w.sum() - w.groupby(w).size()
-    return list(np.round(list(w/w.sum()), 2))
-
-
-def prep_batch(samples: list, dataset: Dataset, batch_size: int, view_size: int):
-    """
-    pregenerated batch for static data
-    """
-    source = np.random.choice(samples)
-    loader = DataLoader(dataset(source, view_size, max_samples=batch_size), batch_size=batch_size)
-    return list(loader)
-
-
-def show_inputs(batch, size=(11, 11)):
-    c = batch[0][0].shape[0]
-    fig, ax = plt.subplots(1, c, figsize=size)
-    for X, Y in batch:
-        for i in range(c):
-            ax[i].imshow(X[i,:].squeeze().numpy(), 'gray')
-            ax[i].axis('off')
-    ax[0].set_title(f'Input:  {X.shape[1:]}', fontsize=10, ha='left', x=0)
+def show_inputs(X, title='Input', size=(10, 10)):
+    n = len(X)
+    fig, ax = plt.subplots(1, n, figsize=size)
+    for i in range(n):
+        ax[i].imshow(X[i,:].squeeze().numpy(), 'gray')
+        ax[i].axis('off')
+    ax[0].set_title(f'{title}:  {X.shape[1:]}', fontsize=10, ha='left', x=0)
     plt.show()
     
     
-def show_targets(batch, size=(11, 11)):    
-    c = batch[0][0].shape[0]
-    fig, ax = plt.subplots(1, c, figsize=size)
-    for X, Y in batch:
-        for i in range(c):
-            ax[i].imshow(Y[i,:].squeeze().numpy(), 'gray')
-            ax[i].axis('off')
-    ax[0].set_title(f'Target:  {Y.shape[1:]}', fontsize=10, ha='left', x=0)
-    plt.show()
+def show_targets(Y, size=(10, 10)):
+    show_inputs(Y, title='Target')
     
     
+def square_clip(image, x, y, w, h):
+    if y < 0:
+        y, h = 0, h + y
+    clip = image[y:y + h,x:x + w]
+    s = max(clip.shape)
+    square = np.zeros((s, s))
+    try:
+        square[(s - h)//2:(s - h)//2 + clip.shape[0],(s - w)//2:(s - w)//2 + clip.shape[1]] = clip
+    except ValueError:
+        return np.zeros((s, s))
+    return square
+
+
+class TokenDataset(Dataset):
+    def __init__(self, source, labels, proba_threshold=0.8, path='training', amp=1, min_count=1, dim=32):
+        self.dim = (dim, dim)
+        self.amp = amp
+        self.labels = labels
+        data = pd.read_csv(f'./data/{path}/{source}.csv.gz')
+        filters = (data['label'].isin(self.labels))&(data['proba'] > proba_threshold)
+        self.data = data.loc[filters,:]
+        index = data[filters].groupby('label').size()
+        # having at least `min_count` samples of each
+        self.index = np.random.permutation(index[index >= min_count].index.tolist())
+        self.image = 255 - load_image(source)
+        
+    def __len__(self):
+        return len(self.index) * self.amp
+    
+    def clip(self, x, y, w, h):        
+        return square_clip(self.image, x, y, w, h)/255.
+    
+    def encode(self, label):
+        if str(label) in self.labels:
+            return self.labels.index(str(label))
+        return self.labels.index('') # not known yet
+    
+    def get_values(self, idx):
+        columns = BOX + ['label','left-side','right-side']
+        values = self.data[self.data['label']==self.index[idx//self.amp]].sample()[columns].values[0]
+        box, label, neighbors = values[:4], values[4], values[5:]
+        return box, label, neighbors
+
+    def __getitem__(self, idx):
+        box, label, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        target = self.clip(x - 1, y - 2, w + 2, h + 4)
+        X = torch.Tensor(cv2.resize(target, self.dim, cv2.INTER_AREA)).unsqueeze(0)
+        Y = torch.Tensor([self.encode(label)]).long()
+        return X, Y
+
+
+class VanillaDataset(TokenDataset):
+    def __init__(self, source, labels, amp=1, min_count=1, dim=32, rec_dim=22, transform=0.9, empty=True):
+        super().__init__(source, labels, amp=amp, min_count=min_count, dim=dim)
+        self.rec = (rec_dim, rec_dim)
+        self.transform_threshold = transform
+        self.empty = empty
+        
+    def transform(self, clip, sigma):
+        if np.random.rand() > self.transform_threshold:
+            return clip
+        h, w = clip.shape
+        box = np.array([[1, 1],[h - 1, 1],[h - 1, w - 1],[1, w - 1]])
+        skew = box + np.random.normal(0, sigma, (4, 2))
+        matrix = cv2.getPerspectiveTransform(box.astype(np.float32), skew.astype(np.float32))
+        return cv2.warpPerspective(clip, matrix, (h, w),flags=cv2.INTER_LINEAR)
+    
+    def __getitem__(self, idx):
+        if self.empty and np.random.rand() < 1./len(self.index):
+            # blank space
+            return torch.zeros(self.dim).unsqueeze(0), torch.zeros(self.rec), 0
+        box, label, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        view = self.transform(self.clip(x, y, w, h), h//10)
+        X = torch.Tensor(cv2.resize(view, self.dim, cv2.INTER_AREA)).unsqueeze(0)
+        Y = torch.Tensor(cv2.resize(view, self.rec, cv2.INTER_AREA))
+        return X, Y, self.encode(label)
+    
+    
+class ConceptDataset(VanillaDataset):
+    def __getitem__(self, idx):
+        box, label, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        concept = self.clip(x, y, w, h)
+        view = self.transform(concept, h//10)
+        X = torch.Tensor(cv2.resize(view, self.dim, cv2.INTER_AREA)).unsqueeze(0)
+        Y = torch.Tensor(cv2.resize(concept, self.rec, cv2.INTER_AREA))
+        return X, Y, self.encode(label)
+    
+    
+class FocusDataset(TokenDataset):
+    def __init__(self, source, labels, rec_dim=22, transform=0.9, empty=True, **kwargs):
+        super().__init__(source, labels, **kwargs)
+        self.rec = (rec_dim, rec_dim)
+        self.transform_threshold = transform
+        self.empty = empty
+        
+    def transform(self, views, sigma, margins=[0, 0]):
+        if np.random.rand() > self.transform_threshold:
+            return views
+        h, w = views[0].shape
+        output = []
+        skew = np.random.normal(0, sigma, (4, 2))
+        for view, m in zip(views, margins):
+            box = np.array([[m, m],[h - m, m],[h - m, w - m],[m, w - m]])
+            matrix = cv2.getPerspectiveTransform(box.astype(np.float32), (box + skew).astype(np.float32))
+            output.append(cv2.warpPerspective(view, matrix, (h, w),flags=cv2.INTER_LINEAR))
+        return output
+    
+    def __getitem__(self, idx):
+        if self.empty and np.random.rand() < 1./len(self.index):
+            # blank space
+            return torch.zeros(self.dim).unsqueeze(0), torch.zeros(self.rec), 0
+        box, label, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        target = self.clip(x - 1, y - 2, w + 2, h + 4)
+        d = h//4
+        s = max(w + d * 2, h + d)
+        dx, dy = (s - w)//2, (s - h)//2
+        context = self.clip(x - dx, y - dy, s, s)
+        target, context = self.transform((target, context), 4)
+        X = torch.Tensor(cv2.resize(context, self.dim, cv2.INTER_AREA)).unsqueeze(0)
+        Y = torch.Tensor(cv2.resize(target, self.rec, cv2.INTER_AREA))
+        return X, Y, self.encode(label)
+    
+    
+class ContextDataset(FocusDataset):    
+    def classify(self, neighbors):
+        left, right = neighbors
+        if left != ' ' and right != ' ':
+            return 0 # mid-word
+        if left == ' ' and right != ' ':
+            return 1 # head
+        if left != ' ' and right == ' ':
+            return 2 # tail
+        return 3 # stand-alone
+    
+    def get_raw(self, idx):
+        if self.empty and np.random.rand() < 1./len(self.index):
+            # blank space
+            return np.zeros(self.dim), np.zeros(self.rec), 0, 4
+        box, label, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        d = 2 * h//3
+        s = max(w + d * 2, h + d)
+        dx, dy = (s - w)//2, (s - h)//2
+        view = self.clip(x - dx, y - dy, s, s)
+        context = view.copy()
+        t, b, l, r = (s - h)//2 - 1, (s + h)//2 + 2, (s - w)//2 - 1, (s + w)//2 + 2
+        context[t:b,l:r] = 0
+        state = self.classify(neighbors)
+        return view, context, self.encode(label), state    
+    
+    def __getitem__(self, idx):
+        view, context, label, state = self.get_raw(idx)
+        view = cv2.resize(view, self.dim, cv2.INTER_AREA)
+        context = cv2.resize(context, self.rec, cv2.INTER_AREA)
+        X = torch.Tensor(cv2.resize(view, self.dim, cv2.INTER_AREA)).unsqueeze(0)
+        Y = torch.Tensor(cv2.resize(context, self.rec, cv2.INTER_AREA))
+        return view, context, label, state
+    
+    
+class PretrainingDataset(ContextDataset):
+    options = [0, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
+    
+    def spoil(self, view):
+        partial = view.copy()
+        if np.random.rand() < 0.3:
+            return partial
+        s = view.shape[0]
+        d = np.random.randint(s//8, s//2)
+        a = np.random.randint(0, s - d)
+        options = [(slice(None, None), slice(a, a + d)),(slice(a, a + d), slice(None, None))]
+        o = np.random.choice(len(options))
+        r, c = options[o]
+        partial[r,c] *= np.random.normal(0, 1, size=(s, d) if o == 0 else (d, s))
+        return np.clip(partial, 0, 1)
+    
+    def __getitem__(self, idx):
+        # get view, context and labels
+        V, C, label, state = super().get_raw(idx)
+        if state == 4:
+            X, Y = [self.spoil(V + np.random.rand(*V.shape) * 1e-4) for _ in range(3)], [C] * 3
+            if np.random.rand() > 0.5:
+                X = [1. - x for x in X]
+            return [torch.Tensor(x).unsqueeze(0) for x in X], [torch.Tensor(y) for y in Y], [0, 0]
+        
+        box, _, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        X, Y = [], []
+        # char
+        orig = self.clip(x - 1, y - 2, w + 2, h + 4)
+        view = self.transform((orig,), h//10)[0]
+        X.append(cv2.resize(self.spoil(view), self.dim, cv2.INTER_AREA))
+        Y.append(cv2.resize(view, self.rec, cv2.INTER_AREA))
+        # focus
+        d = h//4
+        s = max(w + d * 2, h + d)
+        dx, dy = (s - w)//2, (s - h)//2
+        orig = self.clip(x - dx, y - dy, s, s)
+        view = self.transform((orig,), 4)[0]
+        X.append(cv2.resize(self.spoil(view), self.dim, cv2.INTER_AREA))
+        Y.append(cv2.resize(view, self.rec, cv2.INTER_AREA))
+        # context
+        X.append(cv2.resize(self.spoil(V), self.dim, cv2.INTER_AREA))
+        Y.append(cv2.resize(V, self.rec, cv2.INTER_AREA))
+        # rotation
+        orientation = np.random.choice(len(self.options))
+        if orientation != 0:
+            angle = self.options[orientation]
+            X = [cv2.rotate(x, angle) for x in X]
+            Y = [torch.Tensor(cv2.rotate(y, angle)) for y in Y]
+        X, Y = [torch.Tensor(x).unsqueeze(0) for x in X], [torch.Tensor(y) for y in Y]
+        if np.random.rand() > 0.5:
+            return [1. - x for x in X], Y, [label, orientation]
+        return X, Y, [label, orientation]
+    
+    
+class MultitaskDataset(ContextDataset):
+    def spoil(self, view):
+        partial = view.copy()
+        if np.random.rand() < 0.3:
+            return partial
+        s = view.shape[0]
+        d = np.random.randint(s//8, s//2)
+        a = np.random.randint(0, s - d)
+        options = [(slice(None, None), slice(a, a + d)),(slice(a, a + d), slice(None, None))]
+        o = np.random.choice(len(options))
+        r, c = options[o]
+        partial[r,c] *= np.random.normal(0, 1, size=(s, d) if o == 0 else (d, s))
+        return np.clip(partial, 0, 1)
+    
+    def __getitem__(self, idx):
+        # get view, context and labels
+        V, C, label, semantic = super().get_raw(idx)
+        if semantic == 4:
+            X, Y = [self.spoil(V + np.random.rand(*V.shape) * 0.001) for _ in range(3)], [C] * 3
+            if np.random.rand() > 0.5:
+                X = [1. - x for x in X]
+            return [torch.Tensor(x).unsqueeze(0) for x in X], [torch.Tensor(y) for y in Y], [0, 4, 0, 0]
+        
+        box, _, neighbors = self.get_values(idx)
+        x, y, w, h = box
+        X, Y = [], []
+        # concept
+        concept = self.clip(x - 1, y - 2, w + 2, h + 4)
+        view = self.transform((concept,), h//10)[0]
+        X.append(cv2.resize(self.spoil(view), self.dim, cv2.INTER_AREA))
+        Y.append(cv2.resize(concept, self.rec, cv2.INTER_AREA))
+        # focus
+        d = h//4
+        s = max(w + d * 2, h + d)
+        dx, dy = (s - w)//2, (s - h)//2
+        view = self.clip(x - dx, y - dy, s, s)
+        focus, view = self.transform((concept, view), 4)
+        X.append(cv2.resize(self.spoil(view), self.dim, cv2.INTER_AREA))
+        Y.append(cv2.resize(focus, self.rec, cv2.INTER_AREA))
+        # context
+        left, right = [self.encode(x) for x in neighbors]
+        X.append(cv2.resize(self.spoil(V), self.dim, cv2.INTER_AREA))
+        Y.append(cv2.resize(C, self.rec, cv2.INTER_AREA))
+        X, Y = [torch.Tensor(x).unsqueeze(0) for x in X], [torch.Tensor(y) for y in Y]
+        if np.random.rand() > 0.5:
+            return [1. - x for x in X], Y, [label, semantic, left, right]
+        return X, Y, [label, semantic, left, right]
+

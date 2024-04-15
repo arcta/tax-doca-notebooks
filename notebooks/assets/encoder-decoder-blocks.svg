@@ -1,0 +1,116 @@
+<svg width="900" height="430" version="1.1" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="arrow" x1="0" x2="1" y1="0" y2="0">
+    <stop offset="0%" stop-color="white"/>
+    <stop offset="100%" stop-color="#bcd"/>
+  </linearGradient>
+</defs> 
+<g transform="translate(100,80) scale(0.5)" font-family="Arial, Helvetica, sans-serif">
+  <g stroke="#abc">
+    <rect x="-65" y="-80" width="490" height="710"
+          fill="none" stroke-width="3" stroke-dasharray="3,3" rx="30" ry="30" stroke-linejoin="round"/>
+      
+    <rect x="-20" y="-55" width="390" height="542"
+          fill="none" stroke-width="3" stroke-dasharray="3,3" rx="30" ry="30" stroke-linejoin="round"/>
+      
+    <rect x="68" y="-35" width="242" height="480"
+          fill="none" stroke-width="6" rx="30" ry="30" stroke-linejoin="round"/>
+      
+    <rect x="68" y="-25" width="182" height="400"
+          fill="none" stroke-width="6" rx="26" ry="26" stroke-linejoin="round"/>
+      
+    <path fill="none" stroke="white" stroke-width="66" d="M60,-40 L60,460"></path>
+    <path fill="none" stroke-width="16" d="M100,-80 L100,630"></path>
+      
+    <rect x="0" y="0" width="200" height="50"
+          fill="#49b" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="70" width="200" height="50"
+          fill="cyan" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="140" width="200" height="50"
+          fill="#4d9" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="150" y="350" width="200" height="50"
+          fill="#49b" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="210" width="200" height="50"
+          fill="#49b" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="280" width="200" height="50"
+          fill="cyan" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <circle cx="100" cy="375" r="25" fill="#abc"/>
+    <circle cx="100" cy="445" r="25" fill="#abc"/>
+      
+    <rect x="150" y="420" width="200" height="50"
+          fill="#4f7" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="540" width="200" height="50"
+          fill="violet" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+  </g>
+  <g stroke="none" fill="black" style="font:1.5em sans-serif,monospace">
+    <text x="100" y="-90" text-anchor="middle">DownsampleBlock</text>
+    <text x="100" y="31" text-anchor="middle">3 X 3 Conv</text>
+    <text x="100" y="101" text-anchor="middle">GroupNorm</text>
+    <text x="100" y="171" text-anchor="middle">GELU</text>
+    <text x="250" y="381" text-anchor="middle">1 X 1 Conv</text>
+    <text x="100" y="241" text-anchor="middle">3 X 3 Conv</text>
+    <text x="100" y="311" text-anchor="middle">GroupNorm</text>
+    <text x="100" y="382" text-anchor="middle">+</text>
+    <text x="100" y="452" text-anchor="middle">×</text>
+    <text x="250" y="451" text-anchor="middle">Attn OR ReLU</text>
+    <text x="100" y="571" text-anchor="middle">MaxPool</text>
+    <text x="30" y="-260" transform="rotate(90)" text-anchor="left">Residual connection</text>
+    <text x="60" y="-320" transform="rotate(90)" text-anchor="left">Self-Attention</text>
+    <text x="150" y="-377" transform="rotate(90)" text-anchor="left">ConvBlock</text>
+  </g>
+</g>
+<g transform="translate(430,80) scale(0.5)" font-family="Arial, Helvetica, sans-serif">
+  <g stroke="#abc">
+    <rect x="-90" y="-80" width="480" height="710"
+          fill="none" stroke-width="3" stroke-dasharray="3,3" rx="30" ry="30" stroke-linejoin="round"/>
+      
+    <rect x="68" y="40" width="182" height="400"
+          fill="none" stroke-width="6" rx="26" ry="26" stroke-linejoin="round"/>
+
+    <rect x="68" y="-30" width="242" height="480"
+          fill="none" stroke-width="6" rx="32" ry="32" stroke-linejoin="round"/>
+
+    <path fill="none" stroke="white" stroke-width="66" d="M60,-40 L60,460"></path>
+    <path fill="none" stroke-width="16" d="M100,-80 L100,630"></path>
+      
+    <circle cx="100" cy="-30" r="25" fill="#abc"/>      
+    <circle cx="100" cy="40" r="25" fill="#abc"/>
+      
+    <rect x="0" y="85" width="200" height="50"
+          fill="cyan" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="155" width="200" height="50"
+          fill="#49b" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="225" width="200" height="50"
+          fill="#4d9" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+
+    <rect x="0" y="295" width="200" height="50"
+          fill="cyan" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+      
+    <rect x="0" y="365" width="200" height="50"
+          fill="#49b" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+
+    <rect x="0" y="530" width="200" height="50"
+          fill="pink" stroke-width="6" rx="6" ry="6" stroke-linejoin="round"/>
+  </g>
+  <g stroke="none" fill="black" style="font:1.5em sans-serif,monospace">
+    <text x="100" y="-90" text-anchor="middle">UpsampleBlock</text>
+    <text x="100" y="-24" text-anchor="middle">×</text>
+    <text x="100" y="46" text-anchor="middle">+</text>
+    <text x="100" y="116" text-anchor="middle">GroupNorm</text>
+    <text x="100" y="186" text-anchor="middle">3 X 3 Conv</text>
+    <text x="100" y="256" text-anchor="middle">GELU</text>
+    <text x="100" y="326" text-anchor="middle">GroupNorm</text>
+    <text x="100" y="396" text-anchor="middle">3 X 3 Conv</text>
+    <text x="100" y="561" text-anchor="middle">ConvTranspose</text>
+  </g>
+</g>
+</svg>

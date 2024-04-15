@@ -4,6 +4,7 @@
 import os
 import sys
 import cv2
+import math
 import numpy as np
 import pandas as pd
 import pytesseract as ts
@@ -11,8 +12,6 @@ import pytesseract as ts
 from PIL import Image, ImageOps
 from pathlib import Path
 from fitz import fitz
-
-from .prep import img_rotate
 
 
 # target resolution
@@ -23,11 +22,6 @@ INFO = ['font-size','italic','bold','color','cos','sin']
 WIDGETS = ['CheckBox','RadioButton','Text','ComboBox']
 WIDGET_DATA = ['field_name','field_label','field_display','field_type','field_type_string','button_caption',
                'text_fontsize','text_maxlen','text_format','border_width']
-# notebooks path
-ROOT = f'{os.environ["HOME"]}/notebooks'
-# corners TL, BL, BR, TR in the order of 0, 90, 180, 270 rotation labels
-ORDER = [(0,0),(1,0),(1,1),(0,1)]
-
 
 
 def fake_number_input(widget: fitz.Widget, l) -> str:
@@ -207,6 +201,35 @@ def fill_in_blanks(page: fitz.Page, dpi: int = 200, matrix: np.array = None) -> 
     return image, info
 
 
+def img_rotate(imgarr: np.array, angle: float, fill: int = 0) -> np.array:
+    """
+    Rotate the image preserving all content (without cropping corners):
+    may result in a bigger size
+
+    Args:
+        imgarr (np.array): 2d matrix
+        angle (float): rotation angle in degrees (0-360)
+
+    Returns:
+        np.array: 2d matrix
+    """
+    height, width = imgarr.shape
+    center = (width // 2, height // 2)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    
+    # expand to accomodate corners
+    radians = math.radians(angle)
+    sin, cos = math.sin(radians), math.cos(radians)
+    W = int((height * abs(sin)) + (width * abs(cos)))
+    H = int((height * abs(cos)) + (width * abs(sin)))
+    matrix[0, 2] += ((W/2) - center[0])
+    matrix[1, 2] += ((H/2) - center[1])
+    
+    # rotate and fillup with margins backgroung
+    return cv2.warpAffine(imgarr, matrix, (W, H), flags=cv2.INTER_CUBIC,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=fill)
+
+
 def generate_noise(dim: int, light_bias: float = 0.5, noise_strength: float = 0.1, scale: int = 1) -> np.array:
     """
     generate square block filled with random noisy gradients
@@ -234,6 +257,83 @@ def generate_noise(dim: int, light_bias: float = 0.5, noise_strength: float = 0.
     return view * (1 - 0.1 * noise_strength) + (np.random.normal(0, 1, (dim, dim)) * 0.1 * noise_strength)
         
         
+def random_transform(image: np.array, max_skew: int = 9,
+                     light: float = 0.5, noise: float = None, perspective: bool = None) -> np.array:
+    """
+    apply warp, rotation, and add some noise to grayscale image
+    """
+    assert len(image.shape) == 2
+    
+    info = { 'skew':0, 'orient':0, 'warp':None, 'noise':None }    
+    bg = np.random.randint(60, 240)
+    
+    size = tuple((np.array(image.shape) * 1.1).astype(int))
+    transformed = np.ones(size) * bg
+    # make room for some warp
+    size = (np.array(transformed.shape) - np.array(image.shape))//2
+    d = max(size)
+    transformed[size[0]:size[0] + image.shape[0],size[1]:size[1] + image.shape[1]] = image[:,:]
+    # random resize
+    size = tuple((np.array(transformed.shape) * (0.75 + np.random.rand() * 0.25))[::-1].astype(int))
+    transformed = cv2.resize(transformed, size, interpolation=cv2.INTER_AREA)
+    info['size'] = size
+    # generate slight warp
+    if perspective:
+        h, w = transformed.shape
+        base = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]])
+        a, b = np.random.randint(5, d, 2)
+        points = np.float32([[a, b],[b, -a],[-a, -b],[-b, a]])
+        points = np.float32((base + np.random.rand(4, 2) * points).astype(int))
+        matrix = cv2.getPerspectiveTransform(points, base)
+        transformed = cv2.warpPerspective(transformed, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        info['warp'] = points
+    angle = 0
+    # apply random skew and orientation flip
+    if np.random.rand() > 0.95:
+        angle = np.random.randint(max_skew * 2) - max_skew
+        info['skew'] = angle
+    if np.random.rand() > 0.25:
+        orient = np.random.choice([90, 180, 270])
+        angle += orient
+        info['orient'] = orient
+    transformed = img_rotate(transformed, angle, fill=bg)
+    if noise is None:
+        return transformed.astype(np.uint8), info    
+    # add noise
+    h, w = transformed.shape
+    info['noise'] = noise
+    info['light'] = light
+    noise = generate_noise(max(h, w), light_bias=light, noise_strength=noise)[:h,:w]
+    transformed *= (0.5 + noise * 0.5)
+    return transformed.astype(np.uint8), info
+
+
+def generate_empty_sample(image_size: int, noise: float = 0.5) -> np.array:
+    """
+    generate empty view with noise
+    """
+    amp = np.random.rand()
+    noise = generate_noise(image_size, strength=noise)
+    image = np.ones((image_size, image_size)) * 255
+    image *= (1 - amp + noise * amp)
+    return image.astype(np.uint8)
+
+
+def generate_sample(source: str, dpi: int = 200,
+                    max_skew: int = 10, light: float = 0.5, noise: float = 0.5, perspective: bool = True) -> tuple:
+    """
+    generate a noisy scan-similar view along with info on applied transform and the content
+    """
+    index = int(source.split('-').pop())
+    doc = '-'.join(source.split('-')[:-1])
+    with fitz.open(f'./data/forms/{doc}.pdf') as doc:
+        page = doc.load_page(index)
+        image, inputs = fill_in_blanks(page, dpi=dpi)
+    image, info = random_transform(image, max_skew=max_skew, light=light, noise=noise,
+                                   perspective=perspective)
+    return image, info, inputs
+
+
 def random_transform(image: np.array, max_skew: int = 9,
                      light: float = 0.5, noise: float = None, perspective: bool = None) -> np.array:
     """
@@ -287,29 +387,30 @@ def random_transform(image: np.array, max_skew: int = 9,
     return transformed.astype(np.uint8), info
 
 
-def generate_empty_sample(image_size: int, noise: float = 0.5) -> np.array:
+def generate_noise(dim: int, light_bias: float = 0.5, noise_strength: float = 0.1, scale: int = 1) -> np.array:
     """
-    generate empty view with noise
+    generate square block filled with random noisy gradients
+    light-bias: overall level of light -- "white" cannot go darker than that
+    noise-strength: controls random uniform jitter 
     """
-    amp = np.random.rand()
-    noise = generate_noise(image_size, strength=noise)
-    image = np.ones((image_size, image_size)) * 255
-    image *= (1 - amp + noise * amp)
-    return image.astype(np.uint8)
-
-
-def generate_sample(source: str, dpi: int = 200,
-                    max_skew: int = 10, light: float = 0.5, noise: float = 0.5, perspective: bool = True) -> tuple:
-    """
-    generate a noisy scan-similar view along with info on applied transform and the content
-    """
-    index = int(source.split('-').pop())
-    doc = '-'.join(source.split('-')[:-1])
-    with fitz.open(f'./data/forms/{doc}.pdf') as doc:
-        page = doc.load_page(index)
-        image, inputs = fill_in_blanks(page, dpi=dpi)
-    image, info = random_transform(image, max_skew=max_skew, light=light, noise=noise,
-                                   perspective=perspective)
-    return image, info, inputs
-
+    x, y = np.random.rand(2)
+    x = np.linspace(x, x + scale * np.random.rand(), dim)
+    y = np.linspace(y, y + scale * np.random.rand(), dim)
+    view = np.empty((dim, dim))
+    W = np.random.rand(np.random.randint(2, 5), 2) - 0.5
+    W = W / W.sum(axis=0)
+    A = (np.random.rand(W.shape[0], 2) - 0.5) * np.random.rand() * 20
+    B = (np.random.rand(W.shape[0], 2) - np.random.rand()) * 2 * np.pi    
+    X = np.tile(A[:,0], (dim, 1)) * np.tile(x, (A.shape[0], 1)).T
+    X = np.sin(X + np.tile(B[:,0], (dim, 1)))
+    X = (np.dot(X, W[:,0]) + 1.) * 0.5
+    Y = np.tile(A[:,1], (dim, 1)) * np.tile(y, (A.shape[0], 1)).T
+    Y =np.sin(Y + np.tile(B[:,1], (dim, 1)))
+    Y = (np.dot(Y, W[:,1]) + 1.) * 0.5
+    view[:,:] = np.sum(np.array(np.meshgrid(X, Y)), axis=0)
+    view -= np.min(view)
+    view /= np.max(view)
+    view = cv2.GaussianBlur(view, (11, 11), 0)
+    view = light_bias + (1 - light_bias) * view
+    return view * (1 - 0.1 * noise_strength) + (np.random.normal(0, 1, (dim, dim)) * 0.1 * noise_strength)
 

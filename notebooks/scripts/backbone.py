@@ -1,39 +1,15 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-import os
-import re
 import torch
 import numpy as np
 import pandas as pd
 
-from PIL import Image, ImageOps
-from matplotlib import pyplot as plt
-#from matplotlib import patches
 from pathlib import Path
 from typing import Callable
 from einops import rearrange, repeat
-
 from torch import nn, Tensor
 from torchvision import transforms, models
-from torch.utils.data import DataLoader, Dataset
-from torch.optim import SGD, AdamW
-from torch.cuda.amp import GradScaler
-from torchmetrics import Dice, JaccardIndex
-from torchsummary import summary
-from tqdm import tqdm
-from time import time
-
-from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
-
-from . import render
-
-
-# notebooks path
-ROOT = f'{os.environ["HOME"]}/notebooks'
 
 #torch._dynamo.config.verbose = True
 torch.cuda.empty_cache()
@@ -288,11 +264,11 @@ class Attention(nn.Module):
     
     
 class MLP(nn.Sequential):
-    def __init__(self, emb_size: int, expansion: int = 4):
+    def __init__(self, embed_size: int, expansion: int = 4):
         super(MLP, self).__init__(
-            nn.Linear(emb_size, expansion * emb_size),
+            nn.Linear(embed_size, expansion * embed_size),
             nn.GELU(),
-            nn.Linear(expansion * emb_size, emb_size))
+            nn.Linear(expansion * embed_size, embed_size))
     
     
 class TransformerBlock(nn.Module):
@@ -370,6 +346,92 @@ class TransformerDecoder(nn.Module):
         return self.unpatch(x)
 
 #------------------------------------------------
+#   GPT
+#------------------------------------------------
+    
+class AttentionHead(nn.Module):
+    def __init__(self, embed_size, seq_length, head_size, dropout: float = 0.5):
+        super().__init__()
+        self.seq_length = seq_length
+        self.embed_size = embed_size
+        self.head_size = head_size
+        
+        self.key   = nn.Linear(self.embed_size, self.head_size, bias=False)
+        self.query = nn.Linear(self.embed_size, self.head_size, bias=False)        
+        self.value = nn.Linear(self.embed_size, self.head_size, bias=False)
+        self.softmax = nn.Softmax(dim=-1)
+        self.register_buffer('tril', torch.tril(torch.ones(self.seq_length, self.seq_length)))        
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        b, t, c = x.shape
+        K, Q, V = self.key(x), self.query(x), self.value(x)
+        W = Q @ K.transpose(-2, -1) * (c ** 0.5)
+        W = W.masked_fill(self.tril[:t,:t]==0, float('-inf'))
+        W = self.softmax(W)
+        W = self.dropout(W)
+        return W @ V
+
+    
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_size, seq_length, num_heads, dropout: float = 0.5):
+        super().__init__()
+        self.num_heads = num_heads
+        head_size = embed_size // num_heads        
+        self.heads = nn.ModuleList([AttentionHead(embed_size, seq_length, head_size) for _ in range(num_heads)])
+        self.projection = nn.Linear(embed_size, embed_size)        
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        x = torch.cat([h(x) for h in self.heads], dim=-1)
+        x = self.projection(x)
+        x = self.dropout(x)
+        return x
+    
+    
+class GPTBlock(nn.Module):
+    def __init__(self, embed_size, seq_length, num_heads, expansion: int = 4, dropout: float = 0.5):
+        super().__init__()
+        self.attn = MultiHeadAttention(embed_size, seq_length, num_heads)
+        self.attn_norm = nn.LayerNorm(embed_size)
+        self.feed = nn.Sequential(
+            nn.Linear(embed_size, embed_size * expansion),
+            nn.ReLU(),
+            nn.Linear(embed_size * expansion, embed_size),
+            nn.Dropout(dropout))
+        self.feed_norm = nn.LayerNorm(embed_size)
+
+    def forward(self, x):
+        x = x + self.attn(self.attn_norm(x))
+        x = x + self.feed(self.feed_norm(x))        
+        return x
+    
+    
+class ContentGPT(nn.Module):
+    def __init__(self, vocab_size, embed_size, seq_length, num_heads, num_blocks: int = 3):
+        super().__init__()        
+        self.embed_size = embed_size
+        self.seq_length = seq_length        
+        self.token_embed = nn.Embedding(vocab_size, embed_size)
+        self.pos_embed   = nn.Embedding(seq_length, embed_size)        
+        self.blocks = nn.Sequential(*[GPTBlock(embed_size, seq_length, num_heads)] * num_blocks,
+                                    nn.LayerNorm(embed_size) )
+        self.lm_head = nn.Linear(embed_size, vocab_size)
+        
+    def forward(self, x):
+        E, P = self.token_embed(x), self.pos_embed(torch.arange(x.shape[1], device=DEVICE))
+        return self.lm_head(self.blocks(E + P))
+    
+    def generate(self, x, total):
+        for _ in range(total):
+            context = x[:,-self.seq_length:]
+            logits= self(context)
+            logits = logits[:,-1,:]
+            proba = torch.softmax(logits, dim=-1)
+            x = torch.cat((x, torch.multinomial(proba, num_samples=1)), dim=1)
+        return x    
+    
+#------------------------------------------------
 #   utilities
 #------------------------------------------------
     
@@ -394,45 +456,6 @@ class VisualEncoder(nn.Module):
         if self.reduce is None:
             return torch.flatten(x, start_dim=1)
         return torch.flatten(self.reduce(x), start_dim=1)
-    
-
-def get_embeddings(dataset: Dataset, backbone: nn.Module, reduce: nn.Module = None,
-                   target_index: int = None, batch_size: int = 16):
-    calc = VisualEncoder(backbone, reduce).to(DEVICE)
-    calc.eval()
-    embeddings, labels = None, []
-    with torch.no_grad():
-        for inputs, targets in DataLoader(dataset, batch_size=32):
-            vectors = calc(inputs.to(DEVICE)).cpu().numpy().squeeze()
-            embeddings = vectors if embeddings is None else np.concatenate([embeddings, vectors], axis=0)
-            labels += list(targets.cpu().numpy()) if target_index is None \
-                                else list(targets[target_index].cpu().numpy())
-    return embeddings, labels
-
-
-def get_profile(embeddings, labels):
-    """
-    Principal Components and Linear Discriminant
-    """
-    pca, lda = PCA(), LDA()
-    scaler = StandardScaler().fit(embeddings)
-    P, L = pca.fit_transform(scaler.transform(embeddings)), lda.fit_transform(embeddings, labels)
-    # compute 2d tSNE
-    #T = TSNE(n_components=2, perplexity=90).fit_transform(embeddings)
-    return P, pca.explained_variance_ratio_, L, lda.explained_variance_ratio_ #, T
-
-
-def plot_profiles(tags, profile, score):
-    # sort by score
-    order = sorted(zip(tags, score, range(len(tags))), key=lambda x:x[1], reverse=True)
-    # show explained variance ratio profiles
-    fig, ax = plt.subplots(figsize=(6, 6))
-    for t, s, i in order:
-        plt.plot(profile[i][:7], color=f'C{i}', marker='oosDD'[len(t)],
-                 label=f'score: {s:.4f}  model: {"base" if t=="" else t}' )
-    plt.title('PCA explained variance ratio profiles', fontsize=10)
-    plt.legend(title='Clusters silhouette-score', fontsize=8, bbox_to_anchor=(1, 1), frameon=False)
-    plt.show()
     
     
 class Projection(nn.Module):
@@ -474,52 +497,4 @@ class MultitaskClassifier(nn.Module):
                                          
     def forward(self, x):
         return [task(x) for task in self.tasks]
-    
-    
-def get_cnn_backbone(pretrained: bool = False, frozen: bool = False):
-    encoder = CNNEncoder(channels=64, depth=4, residual=True)
-    if pretrained:
-        encoder.load_state_dict(torch.load(f'{ROOT}/models/visual-backbone-CNN.pt'))
-    return encoder
 
-    
-def get_vit_backbone(pretrained: bool = False, frozen: bool = False):
-    encoder = TransformerEncoder(128, 4, 512, 4)
-    if pretrained:
-        encoder.load_state_dict(torch.load(f'{ROOT}/models/visual-backbone-ViT.pt'))
-    return encoder
-    
-    
-def get_cnn_encoder(pretrained: bool = False, frozen: bool = False):
-    encoder = get_cnn_backbone(pretrained, frozen)
-    return VisualEncoder(encoder, reduce=nn.AdaptiveAvgPool2d((1, 1)), frozen=frozen).to(DEVICE)
-
-    
-def get_vit_encoder(pretrained: bool = False, frozen: bool = False):
-    encoder = get_vit_backbone(pretrained, frozen)
-    return VisualEncoder(encoder, reduce=MeanReduce(), frozen=frozen).to(DEVICE)
-    
-
-def get_cnn_head(output_dim: int):
-    return nn.Sequential(
-        nn.AdaptiveAvgPool2d((1, 1)),
-        nn.Flatten(start_dim=1),
-        Head(512, output_dim))
-
-def get_vit_head(output_dim: int):
-    return nn.Sequential(
-        MeanReduce(),
-        Head(512, output_dim))
-
-
-def get_cnn_decoder(encoder: nn.Module, num_classes: int, bridge: bool = False):
-    return nn.Sequential(
-        CNNDecoder(512, encoder.channels, encoder.depth - 1, encoder.residual, encoder.attn, bridge, True),
-        nn.Conv2d(encoder.channels, num_classes, 1, 1),
-        nn.Softmax(dim=1))
-
-
-def get_vit_decoder(encoder: nn.Module, num_classes: int, bridge: bool = False):
-    return nn.Sequential(
-        TransformerDecoder(128, 4, 512, 3, channels=num_classes, bridge=bridge),
-        nn.Softmax(dim=1))

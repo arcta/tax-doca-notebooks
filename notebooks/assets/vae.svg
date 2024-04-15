@@ -1,0 +1,55 @@
+<svg width="900" height="200" version="1.1" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="encoder" x1="0" x2="1" y1="0" y2="0">
+    <stop offset="0%" stop-color="#abc"/>
+    <stop offset="100%" stop-color="#88f"/>
+  </linearGradient>
+  <linearGradient id="decoder" x1="0" x2="1" y1="0" y2="0">
+    <stop offset="0%" stop-color="#88f"/>
+    <stop offset="100%" stop-color="#abc"/>
+  </linearGradient>
+  <linearGradient id="dist" x1="0" x2="1" y1="0" y2="1">
+    <stop offset="10%" stop-color="cyan"/>
+    <stop offset="100%" stop-color="magenta"/>
+  </linearGradient>
+  <linearGradient id="sigma" x1="0" x2="1" y1="0" y2="0">
+    <stop offset="0%" stop-color="cyan"/>
+    <stop offset="80%" stop-color="#88f"/>
+  </linearGradient>
+  <linearGradient id="mu" x1="0" x2="1" y1="0" y2="0">
+    <stop offset="0%" stop-color="magenta"/>
+    <stop offset="90%" stop-color="#88f"/>
+  </linearGradient>
+  <radialGradient id="z" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
+    <stop offset="0%" stop-color="magenta" stop-opacity="0.8"/>
+    <stop offset="100%" stop-color="cyan" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+<g transform="translate(100,100) scale(0.8)" font-family="Arial, Helvetica, sans-serif">
+<g transform="translate(170,0)">
+    <rect x="25" y="-50" width="80" height="100" fill="url(#dist)" stroke="none"/>
+    <path fill="none" stroke="white" stroke-width="100" stroke-dasharray="1,4" d="M24,0 L110,0"></path>
+    <text x="64" y="-55" text-anchor="middle">--- latent dim ---</text>
+</g>  
+<g transform="translate(290,0)">
+    <circle cx="0" cy="0" r="100" fill="url(#z)"/>
+    <text x="18" y="5" text-anchor="middle" style="font-size:1.5em" fill="white">μ, σ</text>
+</g>
+<g transform="translate(60,0)">
+    <path fill="none" stroke="url(#encoder)" stroke-width="5" d="M0,-100 L120,-50 L120,50 L0,100 Z"></path>
+    <text x="60" y="4" text-anchor="middle">Encoder</text>
+</g>
+<g transform="translate(370,0)">
+    <rect x="-55" y="-22" width="50" height="4" fill="url(#sigma)" stroke="none"/>
+    <circle cx="-50" cy="-20" r="5" fill="cyan"/>
+    <rect x="-65" y="18" width="60" height="4" fill="url(#mu)" stroke="none"/>
+    <circle cx="-70" cy="20" r="5" fill="magenta"/>
+    <path stroke="#88f" stroke-width="16" d="M0,-50 L0,50"></path>
+    <text x="0" y="-55" text-anchor="middle">z</text>
+</g>
+<g transform="translate(392,0)">
+    <path fill="none" stroke="url(#decoder)" stroke-width="5" d="M0,-50 L120,-100 L120,100 L0,50 Z"></path>
+    <text x="60" y="4" text-anchor="middle">Decoder</text>
+</g>
+</g>    
+</svg>
