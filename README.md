@@ -6,7 +6,7 @@ c.) ability to learn from interactive feedback.
 
 We won't be using any OCR libraries or services.
 
-We extract layout features using `OpenCV` and train our local nearsighted (char-level) agent to identify each patch and traverse the patches properly to aggregate the text and tables data in a meaningful way (we build our ti.
+We extract layout features using `OpenCV` and train our local nearsighted (char-level) agent to identify each patch and traverse the patches properly to aggregate the text and tables data in a meaningful way (we build our tiny `GPT`).
 Modern laptop should be able to handle this project.
 
 As the example workload we used tax-forms: the problem stated as visual layout understanding enabling high-precision data extraction from the multi-page scanned documents (set of page-images) with high number of different classes to recognize, and sensitive user data which must be properly protected.
@@ -35,9 +35,9 @@ As the example workload we used tax-forms: the problem stated as visual layout u
     * [Form extraction and validation](./notebooks/Traversal-Form.ipynb)
 * Reader Agent
     * [Wire language model in](./notebooks/Agent-LM.ipynb)
-    * [Set RAG utilities](./notebooks/Agent-RAG.ipynb)
-    * [Define FSM](./notebooks/Agent-FSM.ipynb)
-    * [Reinforcement learning setup](./notebooks/Agent-RL.ipynb)
+    * Set RAG utilities
+    * Define FSM
+    * Reinforcement learning setup
 * [Leverage synthetic training data](./notebooks/Data-Gen.ipynb)
 * Optimization for production
 
